@@ -826,6 +826,15 @@ body {
       <input type="number" id="temperatureInput" value="1" min="0" max="1" step="0.1">
     </div>
 
+    <div class="form-group">
+      <label>ストリーミング</label>
+      <select id="streamingInput">
+        <option value="false">OFF（安定モード）</option>
+        <option value="true">ON（リアルタイム表示）</option>
+      </select>
+      <div class="hint">応答が返らない場合はOFFにしてください。</div>
+    </div>
+
     <div class="modal-actions">
       <button class="btn btn-danger" onclick="clearAllHistory()">全履歴削除</button>
       <button class="btn btn-secondary" onclick="testApiConnection()" id="testBtn">🔌 接続テスト</button>
@@ -849,6 +858,7 @@ let state = {
   currentConvId: null,
   isStreaming: false,
   abortController: null,
+  streaming: false,
   pendingFiles: []
 };
 
@@ -1186,7 +1196,7 @@ async function streamResponse(conv) {
     max_tokens: state.maxTokens,
     temperature: state.temperature,
     messages: apiMessages,
-    stream: true
+    stream: state.streaming
   };
 
   if (state.systemPrompt) {
@@ -1194,7 +1204,7 @@ async function streamResponse(conv) {
   }
 
   try {
-    console.log('[PCC] Sending request to API...', { model: state.model, messageCount: apiMessages.length });
+    console.log('[PCC] Sending request...', { model: state.model, streaming: state.streaming, messageCount: apiMessages.length });
 
     let response;
     try {
@@ -1210,9 +1220,8 @@ async function streamResponse(conv) {
         signal: state.abortController.signal
       });
     } catch (fetchErr) {
-      // Network / CORS error
       console.error('[PCC] Fetch failed:', fetchErr);
-      throw new Error('ネットワークエラー: APIに接続できません。CORSまたはネットワークの問題の可能性があります。\n\n詳細: ' + fetchErr.message);
+      throw new Error('ネットワークエラー: APIに接続できません。\n詳細: ' + fetchErr.message);
     }
 
     console.log('[PCC] Response status:', response.status, response.statusText);
@@ -1223,75 +1232,80 @@ async function streamResponse(conv) {
         const errBody = await response.text();
         console.error('[PCC] Error body:', errBody);
         const errJson = JSON.parse(errBody);
-        if (errJson.error?.message) {
-          errMsg = errJson.error.message;
-        }
+        if (errJson.error?.message) errMsg = errJson.error.message;
       } catch(e) {}
 
-      if (response.status === 401) {
-        throw new Error('APIキーが無効です。設定を確認してください。');
-      } else if (response.status === 400) {
-        throw new Error('リクエストエラー: ' + errMsg);
-      } else if (response.status === 429) {
-        throw new Error('レート制限に達しました。少し待ってから再試行してください。');
-      } else if (response.status === 529) {
-        throw new Error('API過負荷中です。しばらく待ってから再試行してください。');
-      }
+      if (response.status === 401) throw new Error('APIキーが無効です。設定を確認してください。');
+      if (response.status === 400) throw new Error('リクエストエラー: ' + errMsg);
+      if (response.status === 429) throw new Error('レート制限に達しました。少し待ってください。');
+      if (response.status === 529) throw new Error('API過負荷中。しばらくお待ちください。');
       throw new Error(errMsg);
     }
 
-    if (!response.body) {
-      throw new Error('レスポンスボディが空です。ブラウザがストリーミングに対応していない可能性があります。');
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
     let assistantText = '';
-    let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    if (!state.streaming) {
+      // ===== Non-streaming mode =====
+      const data = await response.json();
+      console.log('[PCC] Response data:', data);
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      assistantText = data.content
+        ?.filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join('\n') || '';
 
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') continue;
+      typingDiv.querySelector('.content').innerHTML = formatContent(assistantText);
+      container.scrollTop = container.scrollHeight;
 
-          try {
-            const parsed = JSON.parse(data);
+    } else {
+      // ===== Streaming mode =====
+      if (!response.body) {
+        throw new Error('ストリーミング未対応のブラウザです。設定でストリーミングをOFFにしてください。');
+      }
 
-            if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
-              assistantText += parsed.delta.text;
-              typingDiv.querySelector('.content').innerHTML = formatContent(assistantText);
-              container.scrollTop = container.scrollHeight;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+
+            try {
+              const parsed = JSON.parse(data);
+
+              if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
+                assistantText += parsed.delta.text;
+                typingDiv.querySelector('.content').innerHTML = formatContent(assistantText);
+                container.scrollTop = container.scrollHeight;
+              }
+
+              if (parsed.type === 'message_stop') break;
+
+              if (parsed.type === 'error') {
+                console.error('[PCC] Stream error:', parsed.error);
+                throw new Error(parsed.error?.message || 'ストリーミングエラー');
+              }
+            } catch (e) {
+              if (e.message.includes('エラー') || e.message.includes('API')) throw e;
+              continue;
             }
-
-            if (parsed.type === 'message_stop') {
-              break;
-            }
-
-            if (parsed.type === 'error') {
-              console.error('[PCC] Stream error:', parsed.error);
-              throw new Error(parsed.error?.message || 'ストリーミングエラー');
-            }
-          } catch (e) {
-            if (e.message.includes('ストリーミングエラー') || e.message.includes('API'))
-              throw e;
-            // skip JSON parse errors on partial data
-            continue;
           }
         }
       }
     }
 
-    console.log('[PCC] Response complete, length:', assistantText.length);
+    console.log('[PCC] Complete. Response length:', assistantText.length);
 
-    // Save assistant message
     if (assistantText) {
       conv.messages.push({
         role: 'assistant',
@@ -1302,38 +1316,28 @@ async function streamResponse(conv) {
       saveState();
       renderHistory();
     } else {
-      throw new Error('AIからの応答が空でした。モデルまたはリクエスト内容を確認してください。');
+      throw new Error('AIからの応答が空でした。');
     }
 
   } catch (error) {
     console.error('[PCC] Error:', error);
 
     if (error.name === 'AbortError') {
-      // User cancelled
       const partialText = typingDiv.querySelector('.content')?.textContent || '';
       if (partialText) {
-        conv.messages.push({
-          role: 'assistant',
-          content: partialText,
-          model: state.model
-        });
+        conv.messages.push({ role: 'assistant', content: partialText, model: state.model });
         conv.updatedAt = Date.now();
         saveState();
       }
     } else {
-      // Show error
-      if (typingDiv.parentNode) {
-        container.removeChild(typingDiv);
-      }
+      if (typingDiv.parentNode) container.removeChild(typingDiv);
       const errDiv = document.createElement('div');
       errDiv.className = 'error-msg';
       errDiv.innerHTML = '⚠ ' + escapeHtml(error.message).replace(/\n/g, '<br>');
       container.appendChild(errDiv);
       container.scrollTop = container.scrollHeight;
 
-      if (error.message.includes('401') || error.message.includes('APIキーが無効')) {
-        updateApiStatus(false);
-      }
+      if (error.message.includes('APIキーが無効')) updateApiStatus(false);
     }
   }
 
@@ -1419,6 +1423,8 @@ function openSettings() {
   document.getElementById('systemPromptInput').value = state.systemPrompt;
   document.getElementById('maxTokensInput').value = state.maxTokens;
   document.getElementById('temperatureInput').value = state.temperature;
+  document.getElementById('streamingInput').value = state.streaming ? 'true' : 'false';
+  document.getElementById('testResult').style.display = 'none';
   document.getElementById('settingsModal').style.display = 'flex';
 }
 
@@ -1431,6 +1437,7 @@ function saveSettings() {
   state.systemPrompt = document.getElementById('systemPromptInput').value.trim();
   state.maxTokens = parseInt(document.getElementById('maxTokensInput').value) || 4096;
   state.temperature = parseFloat(document.getElementById('temperatureInput').value) || 1;
+  state.streaming = document.getElementById('streamingInput').value === 'true';
   saveState();
   updateApiStatus();
   updateSysPromptIndicator();
