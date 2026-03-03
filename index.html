@@ -733,7 +733,7 @@ body {
       <div class="logo">PC</div>
       <div>
         <h1>Private Console</h1>
-        <div class="version">Claude API Client v1.0</div>
+        <div class="version">Claude API Client v1.1</div>
       </div>
     </div>
 
@@ -796,15 +796,9 @@ body {
         </div>
       </div>
     </div>
-  <!-- Debug Log -->
-  <div id="debugPanel" style="position:fixed;bottom:0;right:0;width:400px;max-height:200px;overflow-y:auto;background:#000;border:1px solid #333;font-family:'JetBrains Mono',monospace;font-size:11px;color:#0f0;padding:8px;z-index:999;display:block;">
-    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-      <span style="color:#ff0;">📋 Debug Log</span>
-      <button onclick="document.getElementById('debugPanel').style.display='none'" style="background:none;border:none;color:#666;cursor:pointer;">✕</button>
-    </div>
-    <div id="debugLog"></div>
   </div>
 </div>
+
 <div class="modal-overlay" id="settingsModal" style="display:none" onclick="event.target===this && closeSettings()">
   <div class="modal">
     <h3>⚙ 設定</h3>
@@ -854,12 +848,6 @@ body {
 <script>
 // ===================== Debug =====================
 function debugLog(msg, type = 'info') {
-  const colors = { info: '#0f0', error: '#f44', warn: '#ff0', data: '#0af' };
-  const el = document.getElementById('debugLog');
-  if (!el) return;
-  const time = new Date().toLocaleTimeString();
-  el.innerHTML += `<div style="color:${colors[type] || '#0f0'};margin:1px 0;">[${time}] ${msg}</div>`;
-  el.parentElement.scrollTop = el.parentElement.scrollHeight;
   console.log(`[PCC ${type}]`, msg);
 }
 
@@ -887,7 +875,7 @@ const MODEL_LABELS = {
 // ===================== Init =====================
 function init() {
   loadState();
-  debugLog('Private Claude Console v1.1 initialized');
+  debugLog('Private Claude Console v1.1 ready');
   debugLog('API key: ' + (state.apiKey ? state.apiKey.substring(0, 10) + '...' : 'NOT SET'), state.apiKey ? 'info' : 'warn');
   debugLog('Model: ' + state.model);
   debugLog('Streaming: ' + state.streaming);
