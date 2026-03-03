@@ -772,7 +772,7 @@ body {
       <div class="logo">PC</div>
       <div>
         <h1>Private Console</h1>
-        <div class="version">Claude API Client v1.2</div>
+        <div class="version">Claude API Client v1.4</div>
       </div>
     </div>
 
@@ -781,6 +781,14 @@ body {
     </button>
 
     <div class="history-list" id="historyList"></div>
+
+    <div id="logPanel" style="height:150px;overflow-y:auto;border-top:1px solid var(--border);padding:8px;font-family:'JetBrains Mono',monospace;font-size:10px;background:var(--bg-primary);">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+        <span style="color:var(--text-muted);font-size:9px;">LOG</span>
+        <button onclick="document.getElementById('logContent').innerHTML=''" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:9px;">clear</button>
+      </div>
+      <div id="logContent"></div>
+    </div>
 
     <div class="sidebar-footer">
       <div class="api-status" id="apiStatus">
@@ -887,6 +895,14 @@ body {
 <script>
 // ===================== Debug =====================
 function debugLog(msg, type = 'info') {
+  const colors = { info: '#8892a4', error: '#ff4757', warn: '#ffa502', data: '#00d4aa' };
+  const el = document.getElementById('logContent');
+  if (el) {
+    const time = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+    el.innerHTML += `<div style="color:${colors[type] || '#8892a4'};margin:1px 0;word-break:break-all;">${time} ${msg}</div>`;
+    const panel = document.getElementById('logPanel');
+    if (panel) panel.scrollTop = panel.scrollHeight;
+  }
   console.log(`[PCC ${type}]`, msg);
 }
 
@@ -914,7 +930,7 @@ const MODEL_LABELS = {
 // ===================== Init =====================
 function init() {
   loadState();
-  debugLog('Private Claude Console v1.1 ready');
+  debugLog('Private Claude Console v1.4 ready');
   debugLog('API key: ' + (state.apiKey ? state.apiKey.substring(0, 10) + '...' : 'NOT SET'), state.apiKey ? 'info' : 'warn');
   debugLog('Model: ' + state.model);
   debugLog('Streaming: ' + state.streaming);
@@ -945,8 +961,43 @@ function saveState() {
     delete toSave.isStreaming;
     delete toSave.abortController;
     delete toSave.pendingFiles;
+
+    // Strip base64 data from messages to avoid localStorage overflow
+    const cleanConvs = {};
+    for (const [id, conv] of Object.entries(toSave.conversations)) {
+      cleanConvs[id] = {
+        ...conv,
+        messages: conv.messages.map(m => {
+          // Strip base64 from content blocks
+          let cleanContent = m.content;
+          if (typeof m.content !== 'string' && Array.isArray(m.content)) {
+            cleanContent = m.content.map(block => {
+              if (block.type === 'image' || block.type === 'document') {
+                return { type: block.type, _stripped: true, _mediaType: block.source?.media_type };
+              }
+              return block;
+            });
+          }
+          // Strip preview base64 from attachments
+          let cleanAttachments = m.attachments;
+          if (m.attachments) {
+            cleanAttachments = m.attachments.map(a => ({
+              type: a.type,
+              name: a.name
+              // preview is intentionally omitted
+            }));
+          }
+          return { ...m, content: cleanContent, attachments: cleanAttachments };
+        })
+      };
+    }
+    toSave.conversations = cleanConvs;
+
     localStorage.setItem('pcc_state', JSON.stringify(toSave));
-  } catch(e) { console.error('Save error:', e); }
+  } catch(e) {
+    console.error('Save error:', e);
+    debugLog('保存エラー: ' + e.message, 'error');
+  }
 }
 
 // ===================== Model Selection =====================
@@ -1065,14 +1116,27 @@ function renderMessage(msg) {
   const roleLabel = msg.role === 'user' ? 'あなた' : MODEL_LABELS[msg.model] || 'Claude';
   let attachmentsHtml = '';
 
+  // Show attachment badges from attachments metadata
   if (msg.attachments && msg.attachments.length > 0) {
     const badges = msg.attachments.map(a => {
-      if (a.type === 'image') {
+      if (a.type === 'image' && a.preview) {
         return `<img class="attachment-thumb" src="${a.preview}" alt="${escapeHtml(a.name)}">`;
       }
       return `<span class="attachment-badge">📄 ${escapeHtml(a.name)}</span>`;
     }).join('');
     attachmentsHtml = `<div class="attachments">${badges}</div>`;
+  }
+
+  // Also detect stripped file blocks in content
+  if (typeof msg.content !== 'string' && Array.isArray(msg.content)) {
+    const fileBlocks = msg.content.filter(b => b._stripped);
+    if (fileBlocks.length > 0 && !attachmentsHtml) {
+      const badges = fileBlocks.map(b => {
+        const icon = b.type === 'image' ? '🖼' : '📄';
+        return `<span class="attachment-badge">${icon} ${b.type} (${b._mediaType || 'file'})</span>`;
+      }).join('');
+      attachmentsHtml = `<div class="attachments">${badges}</div>`;
+    }
   }
 
   const content = typeof msg.content === 'string' ? msg.content :
@@ -1139,7 +1203,9 @@ function escapeHtml(text) {
 // ===================== File Handling =====================
 function handleFiles(event) {
   const files = Array.from(event.target.files);
+  debugLog('ファイル選択: ' + files.length + '件');
   files.forEach(file => {
+    debugLog('読み込み中: ' + file.name + ' (' + file.type + ', ' + (file.size/1024).toFixed(1) + 'KB)');
     const reader = new FileReader();
     reader.onload = (e) => {
       const base64 = e.target.result.split(',')[1];
@@ -1155,7 +1221,11 @@ function handleFiles(event) {
         preview: isImage ? e.target.result : null
       });
 
+      debugLog('添付済: ' + file.name + ' (type=' + (isImage ? 'image' : isPdf ? 'document' : 'unknown') + ', base64=' + (base64.length/1024).toFixed(0) + 'KB)', 'data');
       renderFilePreview();
+    };
+    reader.onerror = () => {
+      debugLog('ファイル読み込み失敗: ' + file.name, 'error');
     };
     reader.readAsDataURL(file);
   });
@@ -1252,6 +1322,9 @@ async function sendMessage() {
   }
 
   debugLog('Content blocks: ' + content.length);
+  if (attachments.length > 0) {
+    debugLog('添付ファイル: ' + attachments.map(a => a.name).join(', '), 'data');
+  }
 
   const userMsg = {
     role: 'user',
@@ -1306,11 +1379,25 @@ async function streamResponse(conv) {
   container.appendChild(typingDiv);
   container.scrollTop = container.scrollHeight;
 
-  // Build API messages (strip attachments/preview data for API)
-  const apiMessages = conv.messages.map(m => ({
-    role: m.role,
-    content: m.content
-  }));
+  // Build API messages (strip attachments metadata, handle stripped file blocks)
+  const apiMessages = conv.messages.map(m => {
+    if (typeof m.content === 'string') {
+      return { role: m.role, content: m.content };
+    }
+    // Filter out stripped blocks, keep real content
+    const apiContent = m.content.filter(block => !block._stripped).map(block => {
+      // Only keep API-compatible fields
+      if (block.type === 'text') return { type: 'text', text: block.text };
+      if (block.type === 'image') return { type: 'image', source: block.source };
+      if (block.type === 'document') return { type: 'document', source: block.source };
+      return block;
+    });
+    // If all blocks were stripped (old messages with files), add placeholder text
+    if (apiContent.length === 0) {
+      return { role: m.role, content: '[添付ファイルあり]' };
+    }
+    return { role: m.role, content: apiContent.length === 1 && apiContent[0].type === 'text' ? apiContent[0].text : apiContent };
+  });
 
   debugLog('API messages built: ' + apiMessages.length);
   apiMessages.forEach((m, i) => {
