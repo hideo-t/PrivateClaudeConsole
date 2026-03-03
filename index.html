@@ -796,10 +796,15 @@ body {
         </div>
       </div>
     </div>
+  <!-- Debug Log -->
+  <div id="debugPanel" style="position:fixed;bottom:0;right:0;width:400px;max-height:200px;overflow-y:auto;background:#000;border:1px solid #333;font-family:'JetBrains Mono',monospace;font-size:11px;color:#0f0;padding:8px;z-index:999;display:block;">
+    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+      <span style="color:#ff0;">📋 Debug Log</span>
+      <button onclick="document.getElementById('debugPanel').style.display='none'" style="background:none;border:none;color:#666;cursor:pointer;">✕</button>
+    </div>
+    <div id="debugLog"></div>
   </div>
 </div>
-
-<!-- Settings Modal -->
 <div class="modal-overlay" id="settingsModal" style="display:none" onclick="event.target===this && closeSettings()">
   <div class="modal">
     <h3>⚙ 設定</h3>
@@ -847,6 +852,17 @@ body {
 </div>
 
 <script>
+// ===================== Debug =====================
+function debugLog(msg, type = 'info') {
+  const colors = { info: '#0f0', error: '#f44', warn: '#ff0', data: '#0af' };
+  const el = document.getElementById('debugLog');
+  if (!el) return;
+  const time = new Date().toLocaleTimeString();
+  el.innerHTML += `<div style="color:${colors[type] || '#0f0'};margin:1px 0;">[${time}] ${msg}</div>`;
+  el.parentElement.scrollTop = el.parentElement.scrollHeight;
+  console.log(`[PCC ${type}]`, msg);
+}
+
 // ===================== State =====================
 let state = {
   apiKey: '',
@@ -871,6 +887,10 @@ const MODEL_LABELS = {
 // ===================== Init =====================
 function init() {
   loadState();
+  debugLog('Private Claude Console v1.1 initialized');
+  debugLog('API key: ' + (state.apiKey ? state.apiKey.substring(0, 10) + '...' : 'NOT SET'), state.apiKey ? 'info' : 'warn');
+  debugLog('Model: ' + state.model);
+  debugLog('Streaming: ' + state.streaming);
   renderHistory();
   updateApiStatus();
   updateSysPromptIndicator();
@@ -1094,8 +1114,10 @@ function removeFile(index) {
 
 // ===================== Send Message =====================
 async function sendMessage() {
+  debugLog('sendMessage() called');
+
   if (state.isStreaming) {
-    // Stop
+    debugLog('Currently streaming, aborting...');
     if (state.abortController) {
       state.abortController.abort();
     }
@@ -1104,12 +1126,23 @@ async function sendMessage() {
 
   const input = document.getElementById('userInput');
   const text = input.value.trim();
-  if (!text && state.pendingFiles.length === 0) return;
+  debugLog('Input text: "' + text.substring(0, 50) + '"');
+  debugLog('Pending files: ' + state.pendingFiles.length);
+
+  if (!text && state.pendingFiles.length === 0) {
+    debugLog('Empty input, returning', 'warn');
+    return;
+  }
 
   if (!state.apiKey) {
+    debugLog('No API key set', 'error');
     openSettings();
     return;
   }
+
+  debugLog('API key: ' + state.apiKey.substring(0, 10) + '...');
+  debugLog('Model: ' + state.model);
+  debugLog('Streaming: ' + state.streaming);
 
   // Create conversation if needed
   if (!state.currentConvId) {
@@ -1164,16 +1197,20 @@ async function sendMessage() {
   renderHistory();
   renderMessages();
 
-  // Start streaming
+  // Start API call
+  debugLog('Calling streamResponse()...');
   await streamResponse(conv);
+  debugLog('sendMessage() complete');
 }
 
 async function streamResponse(conv) {
+  debugLog('streamResponse() called');
   state.isStreaming = true;
   state.abortController = new AbortController();
   updateSendButton();
 
   const container = document.getElementById('chatContainer');
+  debugLog('Message count in conv: ' + conv.messages.length);
 
   // Add typing indicator
   const typingDiv = document.createElement('div');
@@ -1191,6 +1228,12 @@ async function streamResponse(conv) {
     content: m.content
   }));
 
+  debugLog('API messages built: ' + apiMessages.length);
+  apiMessages.forEach((m, i) => {
+    const preview = typeof m.content === 'string' ? m.content.substring(0, 30) : '[array: ' + m.content.length + ' blocks]';
+    debugLog('  msg[' + i + '] ' + m.role + ': ' + preview, 'data');
+  });
+
   const body = {
     model: state.model,
     max_tokens: state.maxTokens,
@@ -1205,6 +1248,8 @@ async function streamResponse(conv) {
 
   try {
     console.log('[PCC] Sending request...', { model: state.model, streaming: state.streaming, messageCount: apiMessages.length });
+    debugLog('Sending fetch to API...');
+    debugLog('Body: stream=' + body.stream + ', model=' + body.model + ', max_tokens=' + body.max_tokens);
 
     let response;
     try {
@@ -1221,10 +1266,12 @@ async function streamResponse(conv) {
       });
     } catch (fetchErr) {
       console.error('[PCC] Fetch failed:', fetchErr);
+      debugLog('FETCH FAILED: ' + fetchErr.message, 'error');
       throw new Error('ネットワークエラー: APIに接続できません。\n詳細: ' + fetchErr.message);
     }
 
     console.log('[PCC] Response status:', response.status, response.statusText);
+    debugLog('Response: ' + response.status + ' ' + response.statusText, response.ok ? 'info' : 'error');
 
     if (!response.ok) {
       let errMsg = `API Error: ${response.status} ${response.statusText}`;
@@ -1246,7 +1293,10 @@ async function streamResponse(conv) {
 
     if (!state.streaming) {
       // ===== Non-streaming mode =====
+      debugLog('Parsing JSON response (non-streaming)...');
       const data = await response.json();
+      debugLog('Response content blocks: ' + (data.content?.length || 0), 'data');
+      debugLog('Stop reason: ' + (data.stop_reason || 'none'), 'data');
       console.log('[PCC] Response data:', data);
 
       assistantText = data.content
@@ -1305,8 +1355,10 @@ async function streamResponse(conv) {
     }
 
     console.log('[PCC] Complete. Response length:', assistantText.length);
+    debugLog('Response text length: ' + assistantText.length, 'info');
 
     if (assistantText) {
+      debugLog('Saving assistant message...', 'info');
       conv.messages.push({
         role: 'assistant',
         content: assistantText,
@@ -1321,6 +1373,8 @@ async function streamResponse(conv) {
 
   } catch (error) {
     console.error('[PCC] Error:', error);
+    debugLog('ERROR: ' + error.message, 'error');
+    debugLog('Error name: ' + error.name, 'error');
 
     if (error.name === 'AbortError') {
       const partialText = typingDiv.querySelector('.content')?.textContent || '';
@@ -1344,6 +1398,7 @@ async function streamResponse(conv) {
   state.isStreaming = false;
   state.abortController = null;
   updateSendButton();
+  debugLog('streamResponse() finished', 'info');
   renderMessages();
 }
 
