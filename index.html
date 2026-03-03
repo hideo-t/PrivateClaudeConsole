@@ -772,7 +772,7 @@ body {
       <div class="logo">PC</div>
       <div>
         <h1>Private Console</h1>
-        <div class="version">Claude API Client v1.4</div>
+        <div class="version">Claude API Client v1.5</div>
       </div>
     </div>
 
@@ -930,7 +930,7 @@ const MODEL_LABELS = {
 // ===================== Init =====================
 function init() {
   loadState();
-  debugLog('Private Claude Console v1.4 ready');
+  debugLog('Private Claude Console v1.5 ready');
   debugLog('API key: ' + (state.apiKey ? state.apiKey.substring(0, 10) + '...' : 'NOT SET'), state.apiKey ? 'info' : 'warn');
   debugLog('Model: ' + state.model);
   debugLog('Streaming: ' + state.streaming);
@@ -1423,26 +1423,42 @@ async function streamResponse(conv) {
     debugLog('Body: stream=' + body.stream + ', model=' + body.model + ', max_tokens=' + body.max_tokens);
 
     let response;
-    try {
-      response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': state.apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true'
-        },
-        body: JSON.stringify(body),
-        signal: state.abortController.signal
-      });
-    } catch (fetchErr) {
-      console.error('[PCC] Fetch failed:', fetchErr);
-      debugLog('FETCH FAILED: ' + fetchErr.message, 'error');
-      throw new Error('ネットワークエラー: APIに接続できません。\n詳細: ' + fetchErr.message);
-    }
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [5, 15, 30]; // seconds
 
-    console.log('[PCC] Response status:', response.status, response.statusText);
-    debugLog('Response: ' + response.status + ' ' + response.statusText, response.ok ? 'info' : 'error');
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': state.apiKey,
+            'anthropic-version': '2023-06-01',
+            'anthropic-dangerous-direct-browser-access': 'true'
+          },
+          body: JSON.stringify(body),
+          signal: state.abortController.signal
+        });
+      } catch (fetchErr) {
+        console.error('[PCC] Fetch failed:', fetchErr);
+        debugLog('FETCH FAILED: ' + fetchErr.message, 'error');
+        throw new Error('ネットワークエラー: APIに接続できません。\n詳細: ' + fetchErr.message);
+      }
+
+      console.log('[PCC] Response status:', response.status, response.statusText);
+      debugLog('Response: ' + response.status + ' ' + response.statusText, response.ok ? 'info' : 'error');
+
+      // Retry on 429 or 529
+      if ((response.status === 429 || response.status === 529) && attempt < MAX_RETRIES) {
+        const delay = RETRY_DELAYS[attempt];
+        debugLog(`⏳ ${response.status === 529 ? 'API過負荷' : 'レート制限'}。${delay}秒後にリトライ (${attempt + 1}/${MAX_RETRIES})...`, 'warn');
+        typingDiv.querySelector('.content').innerHTML = `<div style="color:var(--warning);font-size:13px;">⏳ API過負荷中... ${delay}秒後にリトライ (${attempt + 1}/${MAX_RETRIES})</div>`;
+        await new Promise(r => setTimeout(r, delay * 1000));
+        continue;
+      }
+
+      break; // success or non-retryable error
+    }
 
     if (!response.ok) {
       let errMsg = `API Error: ${response.status} ${response.statusText}`;
@@ -1455,8 +1471,11 @@ async function streamResponse(conv) {
 
       if (response.status === 401) throw new Error('APIキーが無効です。設定を確認してください。');
       if (response.status === 400) throw new Error('リクエストエラー: ' + errMsg);
-      if (response.status === 429) throw new Error('レート制限に達しました。少し待ってください。');
-      if (response.status === 529) throw new Error('API過負荷中。しばらくお待ちください。');
+      if (response.status === 429) throw new Error('レート制限。リトライ上限に達しました。しばらく待ってください。');
+      if (response.status === 529) {
+        const modelName = MODEL_LABELS[state.model] || state.model;
+        throw new Error(`API過負荷（${modelName}）。リトライ上限に達しました。\n💡 別のモデル（Sonnet/Haiku）に切り替えると通る場合があります。`);
+      }
       throw new Error(errMsg);
     }
 
