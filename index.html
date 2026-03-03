@@ -1011,13 +1011,17 @@ function renderMessages() {
 
   if (!state.currentConvId || !state.conversations[state.currentConvId]) {
     container.innerHTML = '';
-    container.appendChild(welcome);
-    welcome.style.display = 'block';
+    if (welcome) {
+      container.appendChild(welcome);
+      welcome.style.display = 'block';
+    } else {
+      container.innerHTML = '<div class="welcome"><h2>Private <span class="accent">Claude</span> Console</h2><p>claude.aiに依存しない、あなた専用のインターフェース。</p></div>';
+    }
     document.getElementById('tokenCount').textContent = '';
     return;
   }
 
-  welcome.style.display = 'none';
+  if (welcome) welcome.style.display = 'none';
   const conv = state.conversations[state.currentConvId];
   let html = '';
 
