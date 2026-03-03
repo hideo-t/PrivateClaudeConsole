@@ -1144,12 +1144,22 @@ async function sendMessage() {
   debugLog('Model: ' + state.model);
   debugLog('Streaming: ' + state.streaming);
 
+  try {
+
   // Create conversation if needed
   if (!state.currentConvId) {
+    debugLog('No current conversation, creating new...');
     newChat();
   }
 
+  debugLog('Current conv ID: ' + state.currentConvId);
   const conv = state.conversations[state.currentConvId];
+  debugLog('Conv exists: ' + !!conv);
+
+  if (!conv) {
+    debugLog('ERROR: conv is null/undefined!', 'error');
+    return;
+  }
 
   // Build user message content
   let content = [];
@@ -1175,6 +1185,8 @@ async function sendMessage() {
     content.push({ type: 'text', text: text });
   }
 
+  debugLog('Content blocks: ' + content.length);
+
   const userMsg = {
     role: 'user',
     content: content.length === 1 && content[0].type === 'text' ? text : content,
@@ -1182,6 +1194,7 @@ async function sendMessage() {
   };
 
   conv.messages.push(userMsg);
+  debugLog('User message pushed. Total messages: ' + conv.messages.length);
 
   // Auto-title
   if (conv.messages.length === 1 && text) {
@@ -1201,6 +1214,11 @@ async function sendMessage() {
   debugLog('Calling streamResponse()...');
   await streamResponse(conv);
   debugLog('sendMessage() complete');
+
+  } catch (e) {
+    debugLog('UNCAUGHT ERROR in sendMessage: ' + e.message, 'error');
+    debugLog('Stack: ' + e.stack, 'error');
+  }
 }
 
 async function streamResponse(conv) {
