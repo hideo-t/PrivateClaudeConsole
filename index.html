@@ -1523,76 +1523,67 @@ async function callApi(conv) {
   if (S.systemPrompt) body.system = S.systemPrompt;
 
   let assistantText = '';
-
-  // Auto-fallback model chain: if 529/429, try next lighter model automatically
   const FALLBACK_CHAIN = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
   let activeModel = S.model;
-  // Start from current model's position in chain
-  let chainStart = FALLBACK_CHAIN.indexOf(activeModel);
-  if (chainStart < 0) chainStart = 0;
 
-  function setTypingLabel(txt, color='var(--warning)') {
+  // --- helper: try one model, return response or null if overloaded ---
+  async function tryModel(model) {
+    body.model = model;
     const mc = typingEl.querySelector('.msg-content');
-    if (mc) mc.innerHTML = `<span style="color:${color};font-size:13px">${txt}</span>`;
-  }
-  function switchModelUI(model) {
-    document.querySelectorAll('.model-tab').forEach(b => b.classList.toggle('active', b.dataset.model === model));
+    if (mc) mc.innerHTML = `<div class="typing-dots"><span></span><span></span><span></span></div>`;
     typingEl.querySelector('.msg-role-name').textContent = MODELS[model] || model;
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': S.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify(body),
+      signal: S.abortCtrl.signal
+    });
+    log('HTTP ' + r.status + ' [' + (MODELS[model]||model) + ']', r.ok ? 'info' : 'warn');
+    return r;
+  }
+
+  function showStatus(msg) {
+    const mc = typingEl.querySelector('.msg-content');
+    if (mc) mc.innerHTML = '<span style="color:var(--warning);font-size:13px">' + msg + '</span>';
   }
 
   try {
-    let resp;
-    let modelIdx = chainStart;
+    // Build fallback list starting from current model
+    let startIdx = FALLBACK_CHAIN.indexOf(S.model);
+    if (startIdx < 0) startIdx = 0;
+    const tryList = FALLBACK_CHAIN.slice(startIdx);
 
-    outerLoop:
-    for (; modelIdx < FALLBACK_CHAIN.length; modelIdx++) {
-      activeModel = FALLBACK_CHAIN[modelIdx];
-      body.model = activeModel;
-      if (modelIdx > chainStart) {
-        log(`🔀 フォールバック → ${MODELS[activeModel]}`, 'warn');
-        setTypingLabel(`🔀 ${MODELS[activeModel]} に切り替えて再試行中…`);
-        switchModelUI(activeModel);
-        await new Promise(r => setTimeout(r, 1500));
+    let resp = null;
+    for (let i = 0; i < tryList.length; i++) {
+      const model = tryList[i];
+      activeModel = model;
+      if (i > 0) {
+        showStatus('🔀 ' + MODELS[model] + ' に切り替え中…');
+        log('🔀 フォールバック → ' + MODELS[model], 'warn');
+        await new Promise(r => setTimeout(r, 1200));
       }
-
-      // Per-model: up to 2 wait-retries (5s, 20s) before falling back
-      for (let wait = 0; wait <= 2; wait++) {
-        resp = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': S.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-          body: JSON.stringify(body),
-          signal: S.abortCtrl.signal
-        });
-        log(`HTTP ${resp.status} [${MODELS[activeModel]}]`, resp.ok ? 'info' : 'warn');
-        if (resp.ok) break outerLoop;
-        if (resp.status === 401) throw new Error('APIキーが無効です。設定を確認してください。');
-        if (resp.status !== 429 && resp.status !== 529) break; // non-overload error → don't retry
-        // Overload: first try a short wait, then fallback to next model
-        if (wait === 0) {
-          setTypingLabel(`⏳ ${MODELS[activeModel]} 過負荷… 5秒待機中`);
-          log(`⏳ 529/429 [${MODELS[activeModel]}] 5秒待機`, 'warn');
-          await new Promise(r => setTimeout(r, 5000));
-        } else {
-          // Move to next model
-          break;
-        }
-      }
-      // If resp still not ok AND there's a next model → loop continues
+      resp = await tryModel(model);
       if (resp.ok) break;
+      if (resp.status === 401) throw new Error('APIキーが無効です。設定を確認してください。');
+      if (resp.status !== 429 && resp.status !== 529) {
+        // Non-overload error — parse and throw
+        let msg = 'API Error ' + resp.status;
+        try { const j = await resp.json(); msg = j.error?.message || msg; } catch(_) {}
+        throw new Error(msg);
+      }
+      // Overload: wait 5s then try next model
+      showStatus('⏳ ' + MODELS[model] + ' 過負荷(529)… 5秒待機後に次のモデルへ');
+      log('⏳ 529 [' + MODELS[model] + '] 5秒待機', 'warn');
+      await new Promise(r => setTimeout(r, 5000));
+      resp = await tryModel(model); // one retry on same model
+      if (resp.ok) break;
+      log('↩ ' + MODELS[model] + ' 再試行も529', 'warn');
     }
 
-    if (!resp.ok) {
-      let msg = `API Error ${resp.status}`;
-      try { const j = await resp.json(); msg = j.error?.message || msg; } catch(e) {}
-      if (resp.status===529||resp.status===429) throw new Error(`全モデルが過負荷（529）です。数分後にお試しください。\n試したモデル: ${FALLBACK_CHAIN.map(m=>MODELS[m]).join(' → ')}`);
-      throw new Error(msg);
+    if (!resp || !resp.ok) {
+      throw new Error('全モデルが過負荷(529)です。数分後にお試しください。\n試したモデル: ' + tryList.map(m => MODELS[m]||m).join(' → '));
     }
-
-    // Update active model in UI if fallback occurred
-    if (activeModel !== S.model) {
-      log(`✅ ${MODELS[activeModel]} で応答取得`, 'data');
-      // Temporarily use this model for this message (don't change S.model permanently)
-    }
+    if (activeModel !== S.model) log('✅ ' + MODELS[activeModel] + ' で応答', 'data');
 
     if (!S.streaming) {
       const data = await resp.json();
