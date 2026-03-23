@@ -851,8 +851,8 @@ function renderMD(text,msgIdx) {
     _codeStore[id]={lang:l,code:c};
     return '\u0000CB'+id+'\u0000';
   });
-  var html=marked.parse(proc);
-  // Escape the placeholder so we can find it (marked may wrap in <p>)
+  // sanitize ONLY the marked output (prose text) — before injecting our safe code block wrappers
+  var html = sanitizeMD(marked.parse(proc));
   blocks.forEach(function(blk){
     var can=['html','svg','htm'].includes(blk.lang.toLowerCase())&&blk.code.length>50;
     var hl=(typeof hljs!=='undefined'&&hljs.getLanguage(blk.lang))
@@ -866,6 +866,37 @@ function renderMD(text,msgIdx) {
     html=html.replace('<p>'+ph+'</p>',wrap).replace(ph,wrap);
   });
   return html;
+}
+
+/**
+ * Lightweight XSS sanitizer for marked.parse() output.
+ * DOMParser を使いブラウザ自身にパースさせてからDOM操作で除去するため
+ * regexより確実。marked出力のみに適用（自前コードブロックは対象外）。
+ */
+function sanitizeMD(html) {
+  try {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var BLOCK = /^(script|iframe|object|embed|form|base|meta|link|style)$/i;
+    // querySelectorAll returns snapshot so removal is safe
+    doc.body.querySelectorAll('*').forEach(function(el) {
+      if (BLOCK.test(el.tagName)) { el.remove(); return; }
+      Array.from(el.attributes).forEach(function(attr) {
+        var n = attr.name, v = attr.value.trim().toLowerCase().replace(/[\s\0]/g,'');
+        // Remove all on* event handlers
+        if (/^on/i.test(n)) { el.removeAttribute(n); return; }
+        // Block javascript: and data:text/html in URL attrs
+        if (/^(href|src|action|formaction|xlink:href)$/i.test(n)) {
+          if (/^javascript:/i.test(v) || /^data:text\/html/i.test(v) || /^vbscript:/i.test(v)) {
+            el.setAttribute(n, '#');
+          }
+        }
+      });
+    });
+    return doc.body.innerHTML;
+  } catch(e) {
+    // フォールバック: 全タグをエスケープ
+    return escHtml(html);
+  }
 }
 
 function copyCodeBlk(id,btn) {
